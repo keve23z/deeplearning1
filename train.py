@@ -1,12 +1,22 @@
+# === Import và cấu hình ===
+
 import pandas as pd
-from datasets import Dataset
-from transformers import GPT2Tokenizer, GPT2LMHeadModel, TrainingArguments, Trainer, DataCollatorForLanguageModeling
 import torch
-from transformers import TrainerCallback
 import os
 import glob
+import matplotlib.pyplot as plt
+from datasets import Dataset
+from transformers import (
+    GPT2Tokenizer,
+    GPT2LMHeadModel,
+    TrainingArguments,
+    Trainer,
+    DataCollatorForLanguageModeling,
+    TrainerCallback
+)
 
 # === 1. Load danh sách câu hỏi đã huấn luyện (nếu file tồn tại) ===
+# === Load danh sách câu hỏi đã huấn luyện (nếu có) ===
 trained_questions_file = "trained_questions.txt"
 if os.path.exists(trained_questions_file):
     with open(trained_questions_file, "r", encoding="utf-8") as f:
@@ -14,31 +24,64 @@ if os.path.exists(trained_questions_file):
 else:
     trained_questions = set()
 
-# === 2. Đọc và xử lý dữ liệu từ file CSV ===
-df = pd.read_csv("chatbot.csv", encoding="utf-8", on_bad_lines='skip')
-df = df[['Question', 'Answer']].dropna()
+# === 2. Đọc và xử lý dữ liệu từ file txt===
+# === Đọc dữ liệu từ file ===
+train_data_file = "train_data.txt"
+questions, answers = [], []
+
+with open(train_data_file, "r", encoding="utf-8") as f:
+    lines = f.readlines()
+
+current_question = None
+for line in lines:
+    line = line.strip()
+    if line.startswith("Q:"):
+        current_question = line[2:].strip()
+    elif line.startswith("A:") and current_question:
+        current_answer = line[2:].strip()
+        questions.append(current_question)
+        answers.append(current_answer)
+        current_question = None
 
 # === 3. Lọc ra các câu hỏi chưa được huấn luyện ===
-new_data = df[~df['Question'].isin(trained_questions)]
-
-if new_data.empty:
-    print("Không có dữ liệu mới để huấn luyện.")
-    exit()
+df = pd.DataFrame({"Question": questions, "Answer": answers})
+new_data = df[~df['Question'].isin(trained_questions)].copy()
 
 # === 4. Tạo cột 'text' định dạng cho GPT-2 ===
-new_data['text'] = "Q: " + new_data['Question'] + "\nA: " + new_data['Answer']
+if new_data.empty:
+    print("Không có dữ liệu mới để huấn luyện.")
+else:
+    new_data['text'] = "Q: " + new_data['Question'] + "\nA: " + new_data['Answer']
+    print(f"Đã lọc {len(new_data)} câu hỏi mới.")
 
-# === 5. Chuyển DataFrame sang Dataset của HuggingFace ===
-dataset = Dataset.from_pandas(new_data[['text']])
+
+# === 5.Chuẩn bị Dataset và Tokenizer===
+# ===Chuyển DataFrame sang Dataset của HuggingFace ===
+# ✅ Kiểm tra và chuẩn hóa dữ liệu
+new_data = new_data.dropna(subset=["text"])
+new_data = new_data[new_data["text"].str.strip().astype(bool)]
+dataset = Dataset.from_pandas(new_data[["text"]])
+
+# ✅ Chia train/test 85% train và 15% validation
+split_dataset = dataset.train_test_split(test_size=0.15, seed=42)
+
 
 # === 6. Tokenizer ===
+# ✅ Tokenizer
 tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
 tokenizer.pad_token = tokenizer.eos_token
 
 def tokenize(sample):
-    return tokenizer(sample['text'], padding="max_length", truncation=True, max_length=256)
+    outputs = tokenizer(sample["text"], padding="max_length", truncation=True, max_length=256)
+    outputs["labels"] = outputs["input_ids"].copy()  # <-- Thêm dòng này
+    return outputs
 
-tokenized_data = dataset.map(tokenize, batched=True)
+
+tokenized_data = split_dataset.map(tokenize, batched=True, remove_columns=["text"])
+
+# ✅ In lại số lượng
+print("Train samples:", len(tokenized_data["train"]))
+print("Test samples :", len(tokenized_data["test"]))
 
 # === 7. Load model GPT-2 ===
 model = GPT2LMHeadModel.from_pretrained("gpt2")
